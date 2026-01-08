@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { Navigation } from '@/components/Navigation';
 import { PegasusAnimation } from '@/components/PegasusAnimation';
+import { ConnectWalletButton } from '@/components/ConnectWalletButton';
 import { motion } from 'framer-motion';
 import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -507,6 +508,7 @@ const LaunchPad = () => {
                 />
               </div>
             </div>
+          </div>
           </div>
 
           {/* Pairs Table */}

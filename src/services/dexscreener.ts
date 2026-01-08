@@ -69,6 +69,7 @@ export interface Pair {
   };
   fdv?: number;
   marketCap?: number;
+  pairCreatedAt?: number;
   info?: {
     imageUrl?: string;
     header?: string;
