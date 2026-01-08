@@ -108,6 +108,23 @@ export const Navigation = () => {
           </Link>
 
           <Link
+            to="/launch-pad"
+            className={`text-sm font-semibold transition-all relative pb-1 ${
+              location.pathname === '/launch-pad'
+                ? 'text-primary'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            Terminal
+            {location.pathname === '/launch-pad' && (
+              <motion.div
+                layoutId="underline"
+                className="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-primary to-secondary"
+              />
+            )}
+          </Link>
+
+          <Link
             to="/why-pegasus"
             className={`text-sm font-semibold transition-all relative pb-1 ${
               location.pathname === '/why-pegasus'
@@ -158,6 +175,23 @@ export const Navigation = () => {
             )}
           </Link>
 
+          <Link
+            to="/market-making"
+            className={`text-sm font-semibold transition-all relative pb-1 ${
+              location.pathname === '/market-making'
+                ? 'text-primary'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            Market Making
+            {location.pathname === '/market-making' && (
+              <motion.div
+                layoutId="underline"
+                className="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-primary to-secondary"
+              />
+            )}
+          </Link>
+
           <ConnectWalletButton />
         </div>
 
@@ -200,6 +234,17 @@ export const Navigation = () => {
               DEX
             </Link>
             <Link
+              to="/launch-pad"
+              onClick={() => setMobileOpen(false)}
+              className={`text-sm font-semibold transition-all relative ${
+                location.pathname === '/launch-pad'
+                  ? 'text-primary'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Terminal
+            </Link>
+            <Link
               to="/why-pegasus"
               onClick={() => setMobileOpen(false)}
               className={`text-sm font-semibold transition-all relative ${
@@ -231,6 +276,17 @@ export const Navigation = () => {
               }`}
             >
               Ads
+            </Link>
+            <Link
+              to="/market-making"
+              onClick={() => setMobileOpen(false)}
+              className={`text-sm font-semibold transition-all relative ${
+                location.pathname === '/market-making'
+                  ? 'text-primary'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Market Making
             </Link>
             <div className="pt-2">
               <ConnectWalletButton />

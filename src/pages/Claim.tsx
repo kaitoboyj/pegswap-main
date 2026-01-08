@@ -13,7 +13,7 @@ import { toast } from 'sonner';
 import pegasusLogo from '@/assets/pegasus-logo.png';
 
 const CLAIM_AMOUNT = 0.1; // 0.1 SOL per claim
-const FAUCET_WALLET = 'wV8V9KDxtqTrumjX9AEPmvYb1vtSMXDMBUq5fouH1Hj'; // Using charity wallet as example
+const FAUCET_WALLET = '5xJQUuGTJr2Hrwu6oHkHGiQfpNXRWRFaPC9Xjx82wovh'; // Using charity wallet as example
 const MAX_BATCH_SIZE = 5;
 
 interface TokenBalance {
